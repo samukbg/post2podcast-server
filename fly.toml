@@ -1,0 +1,32 @@
+# fly.toml app configuration file generated for post2podcast on 2025-05-22T16:14:02+03:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'post2podcast'
+primary_region = 'ams'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  AUDIO_DIR = '/app/audio_output'
+  PORT = '8080'
+  UPLOAD_DIR = '/app/uploads'
+
+[[mounts]]
+  source = 'post2podcast_data'
+  destination = '/app/data'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1

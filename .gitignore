@@ -1,0 +1,53 @@
+# Ignore Stripe webhook module if it's specific to the deployed service
+app/stripe_webhooks.py
+
+# Python virtual environment
+.venv/
+venv/
+env/
+ENV/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# IDE / Editor specific
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Instance folder (common for Flask/FastAPI)
+instance/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Test artifacts
+htmlcov/
+.pytest_cache/
+.coverage
+*.cover
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# Temporary files
+*.tmp
+*.temp
+
+# OS generated files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Secrets - .env should already be handled by the root .gitignore if it exists,
+# but good to have it here too for the server component specifically.
+.env
+.env.*
+!.env.example
