@@ -72,7 +72,7 @@ The server will read this secret at runtime.
 
 ## Integration with WordPress
 
-This server is designed to work with the Post to Podcast WordPress plugin. The plugin sends text content to this API and receives podcast audio files in return.
+This server is designed to work with the Post2Podcast WordPress plugin. The plugin sends text content to this API and receives podcast audio files in return.
 
 ## License
 

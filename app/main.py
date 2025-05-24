@@ -29,6 +29,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+from . import db_utils # Import the new db_utils module
+
 # Create app
 app = FastAPI(
     title="Text to Podcast API",
@@ -76,6 +78,8 @@ class PDF2AudioRequest(BaseModel):
     speaker_2_instructions: str = "Speak in a friendly, but serious tone."
     api_base: Optional[str] = None
     template: str = "podcast"
+    wp_user_email: Optional[str] = None # Added for service tier tracking
+    wp_site_url: Optional[str] = None   # Added for service tier tracking
     edited_transcript: Optional[str] = None
     user_feedback: Optional[str] = None
     original_text: Optional[str] = None
@@ -265,7 +269,9 @@ async def generate_pdf2audio_from_text(background_tasks: BackgroundTasks, reques
             dialog,
             request.edited_transcript,
             request.user_feedback,
-            request.original_text
+            request.original_text,
+            request.wp_user_email, # Pass new field
+            request.wp_site_url    # Pass new field
         )
         
         return JobStatus(
@@ -315,7 +321,9 @@ async def generate_pdf2audio(background_tasks: BackgroundTasks, request: PDF2Aud
             dialog,
             request.edited_transcript,
             request.user_feedback,
-            request.original_text
+            request.original_text,
+            request.wp_user_email, # Pass new field
+            request.wp_site_url    # Pass new field
         )
         
         return JobStatus(
@@ -366,27 +374,69 @@ async def process_pdf2audio_generation(
     podcast_dialog_instructions: str,
     edited_transcript: str,
     user_feedback: str,
-    original_text: str
+    original_text: str,
+    # These will be passed from the request object by FastAPI when calling the background task
+    # However, the background task signature needs to match how it's called.
+    # Let's assume they are passed through the 'request: PDF2AudioRequest' object
+    # and accessed via request.wp_user_email, request.wp_site_url inside the calling endpoint.
+    # The background task itself will receive these as direct arguments.
+    # So, the call from the endpoint needs to be updated.
+    # For now, let's add them to the signature here.
+    wp_user_email_from_request: Optional[str] = None, 
+    wp_site_url_from_request: Optional[str] = None
 ):
     """Process PDF2Audio generation in the background"""
-    try:
-        # Determine the API key to use
-        actual_openai_api_key = openai_api_key
-        if not actual_openai_api_key:
-            logger.info("OpenAI API key not provided in request for /pdf2audio/generate/text, attempting to use server environment variable.")
-            actual_openai_api_key = os.environ.get("OPENAI_API_KEY")
-            if not actual_openai_api_key:
-                logger.error("OpenAI API key is not configured on the server (OPENAI_API_KEY env var) and was not provided in the request.")
-                raise Exception("OpenAI API key is not configured on the server and was not provided in the request.")
+    is_self_hosted_call = bool(openai_api_key) # If user provides their own key, it's self-hosted
+    actual_openai_api_key_to_use = openai_api_key # Key from the request (for self-hosted)
+    user_identifier = None
 
+    try:
+        if not is_self_hosted_call:
+            # This is a service user, check free credits
+            if not wp_user_email_from_request or not wp_site_url_from_request:
+                logger.error(f"Job {job_id}: Missing wp_user_email or wp_site_url for service tier audio generation.")
+                jobs[job_id].update({"status": "failed", "message": "User identification missing for service tier.", "error": "User identification missing."})
+                return
+
+            user_identifier = f"{wp_user_email_from_request.lower().strip()}:{wp_site_url_from_request.lower().strip().rstrip('/')}"
+            
+            # Check for active subscription first
+            active_subscription = db_utils.get_subscription_status_by_identifier(user_identifier)
+
+            if active_subscription:
+                logger.info(f"Job {job_id}: User {user_identifier} has an active subscription. Bypassing free credit check.")
+                # User is subscribed and active, proceed with server's key
+                actual_openai_api_key_to_use = os.environ.get("OPENAI_API_KEY")
+            else:
+                # Not actively subscribed (or no record), check free credits
+                credits_used = db_utils.get_free_credits_used(user_identifier)
+                MAX_FREE_CREDITS = 3 # Define this constant
+                if credits_used >= MAX_FREE_CREDITS:
+                    logger.warning(f"Job {job_id}: User {user_identifier} has exhausted free credits ({credits_used}/{MAX_FREE_CREDITS} used) and no active subscription.")
+                    jobs[job_id].update({
+                        "status": "failed", 
+                        "message": "Free credits exhausted.", 
+                        "error": f"You have used all your {MAX_FREE_CREDITS} free audio generations. Please subscribe for more."
+                    })
+                    return
+                # If service call and free credits available, use server's OpenAI key
+                actual_openai_api_key_to_use = os.environ.get("OPENAI_API_KEY")
+                logger.info(f"Job {job_id}: User {user_identifier} using free credit {credits_used + 1}/{MAX_FREE_CREDITS}.")
+
+
+            if not actual_openai_api_key_to_use: # This covers both subscribed and free tier needing the server key
+                logger.error(f"Job {job_id}: Server's OPENAI_API_KEY is not configured for service tier generation.")
+                jobs[job_id].update({"status": "failed", "message": "Service configuration error.", "error": "Service configuration error."})
+                return
+        
         # Update job status
         jobs[job_id]["status"] = "processing"
         jobs[job_id]["message"] = "Starting PDF2Audio generation"
         
         # Generate audio
-        audio_filepath, transcript, _, audio_duration_seconds = generate_audio_from_text( # Added audio_duration_seconds
-            files=[],  # No files, using original_text
-            openai_api_key=actual_openai_api_key,
+        audio_filepath, transcript, _, audio_duration_seconds = generate_audio_from_text(
+            files=[],
+            openai_api_key=actual_openai_api_key_to_use, # Use the determined API key
             text_model=text_model,
             reasoning_effort=reasoning_effort,
             audio_model=audio_model,
@@ -416,9 +466,23 @@ async def process_pdf2audio_generation(
         jobs[job_id]["audio_duration"] = audio_duration_seconds # Store duration
         jobs[job_id]["completion_time"] = time.time()
         
-        logger.info(f"PDF2Audio job {job_id} completed successfully, Duration: {audio_duration_seconds:.2f}s")
-    
+        log_user_identifier = user_identifier if user_identifier else 'self-hosted'
+        logger.info(f"PDF2Audio job {job_id} completed successfully for user_identifier='{log_user_identifier}', Duration: {audio_duration_seconds:.2f}s")
+
+        # After successful (or attempted, depending on policy) generation for a service user on free tier:
+        if not is_self_hosted_call and user_identifier and not active_subscription: 
+            # Only increment free credits if they are not actively subscribed
+            db_utils.increment_free_credit_usage(user_identifier)
+            logger.info(f"Job {job_id}: Incremented free credit usage for {user_identifier}.")
+            
     except Exception as e:
+        log_user_identifier_on_error = 'self-hosted'
+        if user_identifier: # If it was set (i.e., service call attempt)
+            log_user_identifier_on_error = user_identifier
+        elif wp_user_email_from_request and wp_site_url_from_request: # If it was a service call but failed before user_identifier was set
+             log_user_identifier_on_error = f"{wp_user_email_from_request.lower().strip()}:{wp_site_url_from_request.lower().strip().rstrip('/')}"
+        
+        logger.error(f"PDF2Audio job {job_id} failed for user_identifier='{log_user_identifier_on_error}': {str(e)}")
         # Update job status with error
         jobs[job_id]["status"] = "failed"
         jobs[job_id]["message"] = "PDF2Audio generation failed"
@@ -503,11 +567,18 @@ async def process_audio_generation(
         logger.error(f"Job {job_id} failed: {str(e)}")
 
 # Attempt to import and include Stripe webhooks if the module exists
+# All Stripe routes (webhooks, create-checkout-session) are now in stripe_webhooks.py
+# and should be prefixed, e.g., with /stripe
 try:
     from . import stripe_webhooks
-    app.include_router(stripe_webhooks.router)
-    logger.info("Stripe webhooks module loaded and router included.")
+    app.include_router(stripe_webhooks.router, prefix="/stripe", tags=["Stripe"])
+    logger.info("Stripe webhooks module loaded and router included under /stripe prefix.")
 except ImportError:
-    logger.info("Stripe webhooks module (stripe_webhooks.py) not found. Skipping Stripe webhook routes.")
-except AttributeError:
-    logger.error("Stripe webhooks module found, but 'router' attribute is missing. Webhook routes not loaded.")
+    logger.info("Stripe webhooks module (stripe_webhooks.py) not found. Skipping Stripe routes.")
+except AttributeError as e:
+    logger.error(f"Stripe webhooks module found, but 'router' attribute is missing or other error: {e}. Stripe routes not loaded.")
+
+@app.on_event("startup")
+async def startup_event():
+    db_utils.init_db()
+    logger.info("Application startup: Database initialized.")
